@@ -142,6 +142,7 @@ app.post("/external-offers", async (req, res) => {
           ourValue:  `${euro(display.ourAmount)} ${display.vatTagOur}`,
           // button price
           offerPrice: Number(offerPriceForButton.toFixed(2)),
+          vatLabel: confirmedVatType, // 👈 pass it through
         });
 
         await logOfferMessage({
@@ -172,6 +173,7 @@ app.post("/external-offers", async (req, res) => {
           sellingLine: `Selling Price ${euro(confirmedDisplayAmount)} ${display.vatTagYour}`,
           // put the amount into the button payload so we store exactly this on Confirm
           confirmPrice: Number(confirmedDisplayAmount.toFixed(2)),
+          vatLabel: confirmedVatType, // 👈 pass it through
         });
 
         await logOfferMessage({
@@ -220,7 +222,7 @@ app.post("/disable-offers", async (req, res) => {
 
 /* -------------------- Button interactions (external only) -------------------- */
 await initDiscord();
-await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecordId, offerPrice, channelId, messageId }) => {
+await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecordId, offerPrice, vatLabel, channelId, messageId }) => {
   try {
     // External buttons are confirm_ext / deny_ext
     if (action === "deny_ext") {
@@ -242,6 +244,7 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
       confirmedPrice: offerPrice,
       confirmedSellerRecId,
       statusName: "Confirmed",
+      offerVatTypeLabel: vatLabel, // 👈 write Offer VAT Type single-select
       // Offer VAT Type is set server-side at send time via a small trick:
       // we’ll store it after this handler by calling setExternalConfirmation again if the message carried a hint.
     });
