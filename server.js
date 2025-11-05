@@ -5,7 +5,7 @@ import {
   initDiscord,
   onButtonInteraction,
   sendExternalOfferMessageGateway,         // OFFER (offer-inquiries)
-  sendExternalConfirmationMessageGateway,  // CONFIRMATION (confirmation-requests)
+  sendExternalConfirmationMessageGateway,  // CONFIRMATION (offer-inquiries)
   disableMessageButtonsGateway,
 } from "./lib/discord.js";
 import {
@@ -23,26 +23,47 @@ app.use(express.urlencoded({ extended: true }));
 app.get("/", (_req, res) => res.type("text/plain").send("External offers service OK"));
 app.get("/health", (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-/* -------------------- VAT helpers -------------------- */
+/* -------------------- Helpers -------------------- */
 const isNL = (s) => {
   if (!s) return false;
   const t = String(s).trim().toLowerCase();
-  // exact / common variants
   if (t === "nl" || t === "nld" || t === "nederland" || t === "netherlands" || t === "the netherlands") return true;
-  // contains (handles "Nederland 🇳🇱", "Netherlands (EU)", etc.)
   if (t.includes("neder") || t.includes("nether") || t.includes("🇳🇱")) return true;
   return false;
 };
 const euro = (v) => (typeof v === "number" && isFinite(v) ? `€${v.toFixed(2)}` : "—");
-const toPct01 = (p) => (p == null ? null : (p > 1 ? p / 100 : p)); // 21 -> 0.21
+const toNumber = (v) => {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const n = parseFloat(v.replace(/[^\d.,-]/g, "").replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
+const toPct01 = (p) => {
+  const n = toNumber(p);
+  if (n == null) return null;
+  return n > 1 ? n / 100 : n; // 21 -> 0.21
+};
 
+/* -------------------- Mode + display decision -------------------- */
 function decideModeAndDisplay({
   vatTypeRaw, sellerCountry, sellerVatPct, sellerSuggestedRaw, ourOfferIncl,
 }) {
-  const vt = String(vatTypeRaw || "").toUpperCase();
-  const sellerPct01 = toPct01(sellerVatPct ?? 0.21) ?? 0.21; // fallback 21%
-  let basisSeller, basisOurs, display; // display = {yourLabel, ourLabel, yourAmount, ourAmount, vatTagYour, vatTagOur}
-  let confirmedVatType;               // what we store in "Offer VAT Type" on Confirm
+  // Normalize VAT type (handles "VAT 0" / "VAT-0")
+  const vt = String(vatTypeRaw || "")
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/-/g, "");
+
+  // Normalize seller VAT% (handles "21%" or 21)
+  const sellerPct01 = toPct01(sellerVatPct ?? 21) ?? 0.21; // fallback 21%
+
+  // Treat as NL if country is NL or (VAT0 + VAT%≈21) to be resilient
+  const treatAsNL = isNL(sellerCountry) || (vt.includes("VAT0") && Math.abs(sellerPct01 * 100 - 21) < 0.5);
+
+  let basisSeller, basisOurs, display;
+  let confirmedVatType;
 
   if (vt.includes("MARGIN")) {
     // Compare incl; display incl (Margin)
@@ -57,6 +78,7 @@ function decideModeAndDisplay({
       ourLabel:   "Our Offer",
     };
     confirmedVatType = "Margin";
+
   } else if (vt.includes("VAT21")) {
     // Compare incl; display incl (VAT 21%)
     basisSeller = sellerSuggestedRaw;
@@ -70,8 +92,9 @@ function decideModeAndDisplay({
       ourLabel:   "Our Offer",
     };
     confirmedVatType = "VAT21";
-  } else if (vt.includes("VAT0") && isNL(sellerCountry)) {
-    // Compare incl (uplift seller by their VAT rate); display incl
+
+  } else if (vt.includes("VAT0") && treatAsNL) {
+    // VAT0 + NL → compare incl (uplift), display incl (VAT 21%)
     const factor = 1 + sellerPct01; // ~1.21
     basisSeller = sellerSuggestedRaw * factor;
     basisOurs   = ourOfferIncl;
@@ -83,9 +106,10 @@ function decideModeAndDisplay({
       yourLabel:  "Your Price",
       ourLabel:   "Our Offer",
     };
-    confirmedVatType = "VAT21"; // you want the confirmed *display* VAT type
-  } else {
-    // VAT0 + non-NL → compare and display on VAT0 basis
+    confirmedVatType = "VAT21";
+
+  } else if (vt.includes("VAT0")) {
+    // VAT0 + non-NL → compare/display on VAT0 basis (divide our incl by 1+VAT%)
     const divisor = 1 + sellerPct01; // ~1.21
     basisSeller = sellerSuggestedRaw;
     basisOurs   = ourOfferIncl / divisor;
@@ -98,8 +122,23 @@ function decideModeAndDisplay({
       ourLabel:   "Our Offer",
     };
     confirmedVatType = "VAT0";
+
+  } else {
+    // Unknown → safe default: treat like VAT21 (incl basis)
+    basisSeller = sellerSuggestedRaw;
+    basisOurs   = ourOfferIncl;
+    display = {
+      yourAmount: sellerSuggestedRaw,
+      ourAmount:  ourOfferIncl,
+      vatTagYour: "(VAT 21%)",
+      vatTagOur:  "(VAT 21%)",
+      yourLabel:  "Your Price",
+      ourLabel:   "Our Offer",
+    };
+    confirmedVatType = "VAT21";
   }
 
+  // Decide message type
   const mode = basisOurs < basisSeller ? "offer" : "confirm";
   return { mode, display, confirmedVatType, decision: { basisOurs, basisSeller } };
 }
@@ -119,7 +158,6 @@ app.post("/external-offers", async (req, res) => {
 
     const results = [];
     for (const s of sellers) {
-      // Inputs from your Airtable payload
       const vatTypeRaw        = s.sellerVatType;
       const sellerCountry     = s.sellerCountry || "";
       const sellerVatPct      = s.sellerVatRatePct ?? 21;
@@ -132,8 +170,8 @@ app.post("/external-offers", async (req, res) => {
       });
 
       if (mode === "offer") {
-        // Offer message (offer-inquiries) – show both prices per your rules
-        const offerPriceForButton = display.ourAmount; // this is what seller accepts
+        // Offer: show both prices (per VAT rules)
+        const offerPriceForButton = display.ourAmount; // what seller accepts if they click
         const { channelId, messageId } = await sendExternalOfferMessageGateway({
           orderRecId,
           orderHumanId,
@@ -143,14 +181,12 @@ app.post("/external-offers", async (req, res) => {
           productName: s.productName || null,
           sku,
           size,
-          // display fields
           yourLabel: display.yourLabel,
           yourValue: `${euro(display.yourAmount)} ${display.vatTagYour}`,
           ourLabel:  display.ourLabel,
           ourValue:  `${euro(display.ourAmount)} ${display.vatTagOur}`,
-          // button price
           offerPrice: Number(offerPriceForButton.toFixed(2)),
-          vatLabel: confirmedVatType, // 👈 pass it through
+          vatLabel: confirmedVatType, // carry VAT label to click handler
         });
 
         await logOfferMessage({
@@ -163,12 +199,10 @@ app.post("/external-offers", async (req, res) => {
         });
 
         results.push({ sellerId: s.sellerId, messageId, kind: "offer", confirmedVatType });
-      } else {
-        // Confirmation message (confirmation-requests)
-        // For confirm mode we show only "Selling Price ..." with the normalized display number
-        // Confirmed price is the *seller* price on the display basis.
-        const confirmedDisplayAmount = display.yourAmount;
 
+      } else {
+        // Confirm: show single "Selling Price ..." line
+        const confirmedDisplayAmount = display.yourAmount;
         const { channelId, messageId } = await sendExternalConfirmationMessageGateway({
           orderRecId,
           orderHumanId,
@@ -179,9 +213,8 @@ app.post("/external-offers", async (req, res) => {
           sku,
           size,
           sellingLine: `Selling Price ${euro(confirmedDisplayAmount)} ${display.vatTagYour}`,
-          // put the amount into the button payload so we store exactly this on Confirm
           confirmPrice: Number(confirmedDisplayAmount.toFixed(2)),
-          vatLabel: confirmedVatType, // 👈 pass it through
+          vatLabel: confirmedVatType, // carry VAT label to click handler
         });
 
         await logOfferMessage({
@@ -243,22 +276,17 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
     const confirmedSellerRecId = await getInventoryLinkedSellerId(inventoryRecordId);
 
     // Write Status + Price + Seller + Offer VAT Type
-    // We don't know the VAT type label here, but we set it earlier by the decision rule.
-    // To pass it through, encode it into message custom_id or infer from fields;
-    // simplest: infer via the same decision here would require more inputs.
-    // Instead, we set it by display tag in server route, not here.
     await setExternalConfirmation({
       orderRecId,
       confirmedPrice: offerPrice,
       confirmedSellerRecId,
       statusName: "Confirmed",
-      offerVatTypeLabel: vatLabel, // 👈 write Offer VAT Type single-select
-      // Offer VAT Type is set server-side at send time via a small trick:
-      // we’ll store it after this handler by calling setExternalConfirmation again if the message carried a hint.
+      offerVatTypeLabel: vatLabel, // "Margin" | "VAT0" | "VAT21"
     });
 
     await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
 
+    // Close other messages for this order
     const msgs = await listOfferMessagesForOrder(orderRecId);
     await Promise.allSettled(
       msgs
