@@ -24,7 +24,15 @@ app.get("/", (_req, res) => res.type("text/plain").send("External offers service
 app.get("/health", (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
 /* -------------------- VAT helpers -------------------- */
-const isNL = (s) => String(s || "").toLowerCase().includes("nether");
+const isNL = (s) => {
+  if (!s) return false;
+  const t = String(s).trim().toLowerCase();
+  // exact / common variants
+  if (t === "nl" || t === "nld" || t === "nederland" || t === "netherlands" || t === "the netherlands") return true;
+  // contains (handles "Nederland 🇳🇱", "Netherlands (EU)", etc.)
+  if (t.includes("neder") || t.includes("nether") || t.includes("🇳🇱")) return true;
+  return false;
+};
 const euro = (v) => (typeof v === "number" && isFinite(v) ? `€${v.toFixed(2)}` : "—");
 const toPct01 = (p) => (p == null ? null : (p > 1 ? p / 100 : p)); // 21 -> 0.21
 
