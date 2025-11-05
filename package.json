@@ -1,5 +1,5 @@
 {
-  "name": "kc-external-offers-service",
+  "name": "partner-consignment-external-bot",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
