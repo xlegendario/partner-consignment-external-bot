@@ -10,9 +10,9 @@ import {
 import {
   logOfferMessage,
   listOfferMessagesForOrder,
-  createSaleAndDecrement,
-  hasSaleForOrder,
-  setOfferStatus, // sets Offer Status on External Sales Log
+  // NEW helpers consumed here:
+  getInventoryLinkedSellerId,
+  setExternalConfirmation,
 } from "./lib/airtable.js";
 
 const processingOrders = new Set();
@@ -117,41 +117,33 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
       return;
     }
 
-    // 1) Mutex
+    // 1) Mutex to avoid double processing on rapid clicks
     if (processingOrders.has(orderRecId)) {
       await disableMessageButtonsGateway(channelId, messageId, "⏳ Already being processed by another click.");
       return;
     }
     processingOrders.add(orderRecId);
 
-    // 2) Idempotency across retries/instances
-    if (await hasSaleForOrder(orderRecId)) {
-      const msgs = await listOfferMessagesForOrder(orderRecId);
-      await Promise.allSettled(
-        msgs.map(m => disableMessageButtonsGateway(m.channelId, m.messageId, "✅ Already matched. Offers closed."))
-      );
-      return;
-    }
+    // 2) Resolve the Linked Seller record id from the Inventory row
+    const confirmedSellerRecId = await getInventoryLinkedSellerId(inventoryRecordId);
 
-    // 3) Create sale + decrement inventory
-    await createSaleAndDecrement({ inventoryId: inventoryRecordId, orderRecId, finalPrice: offerPrice });
+    // 3) Write confirmation fields on the External Sales Log row
+    await setExternalConfirmation({
+      orderRecId,
+      confirmedPrice: offerPrice,
+      confirmedSellerRecId,
+      statusName: "Confirmed",
+    });
 
-    // 4) Set Offer Status = Confirmed on External Sales Log
-    try {
-      await setOfferStatus({ orderRecId, statusName: "Confirmed" });
-    } catch (e) {
-      console.warn("[setOfferStatus external] warn:", e.message);
-    }
+    // 4) Disable clicked message
+    await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
 
-    // 5) Disable clicked message
-    await disableMessageButtonsGateway(channelId, messageId, `✅ Matched by ${sellerId}.`);
-
-    // 6) Disable all other messages for this record
+    // 5) Disable all other messages for this external record
     const msgs = await listOfferMessagesForOrder(orderRecId);
     await Promise.allSettled(
       msgs
         .filter(m => !(m.channelId === channelId && m.messageId === messageId))
-        .map(m => disableMessageButtonsGateway(m.channelId, m.messageId, "✅ Matched by another seller. Offers closed."))
+        .map(m => disableMessageButtonsGateway(m.channelId, m.messageId, "✅ Confirmed by another seller. Offers closed."))
     );
   } catch (e) {
     console.error("Interaction handling error:", e);
