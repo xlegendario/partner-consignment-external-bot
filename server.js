@@ -361,13 +361,14 @@ app.post("/finalize-external-deal", async (req, res) => {
       return res.status(500).json({ error: "Affiliate Sales create failed", salesId, detail: e.message });
     }
 
-    // Success message (you can also move Deal Status forward here if you want)
+    // Success message + move status forward ✅
     await writeExternalFeedback(recordId, {
-      feedback: `✅ Created Sales (${salesId}) and Affiliate Sales.`,
-      // dealStatusName: "Closed", // uncomment if you want to move it forward
+      feedback: `✅ Deal processed. Sales created: ${salesId}. Affiliate Sales created successfully.`,
+      dealStatusName: "Deal Processed",   // 👈 move to the final state
     });
 
     return res.json({ ok: true, salesId });
+
   } catch (e) {
     console.error("finalize-external-deal error:", e);
     try {
