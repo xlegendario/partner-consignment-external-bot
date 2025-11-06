@@ -268,8 +268,9 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
       confirmedPrice: offerPrice,
       confirmedSellerRecId,
       statusName: "Confirmed",
-      offerVatTypeLabel: vatLabel, // "Margin" | "VAT0" | "VAT21"
-      dealStatusName: "Closing",   // move to Closing on accept
+      offerVatTypeLabel: vatLabel,       // "Margin" | "VAT0" | "VAT21"
+      dealStatusName: "Closing",
+      confirmedInventoryRecId: inventoryRecordId, // ← NEW: remember which Inventory row to decrement
     });
 
     await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
