@@ -282,6 +282,7 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
       confirmedSellerRecId,
       statusName: "Confirmed",
       offerVatTypeLabel: vatLabel, // "Margin" | "VAT0" | "VAT21"
+      dealStatusName: "Closing", // 👈 NEW: make sure Deal Status flips to Closing now
     });
 
     await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
