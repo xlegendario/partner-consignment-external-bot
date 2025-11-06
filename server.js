@@ -4,15 +4,21 @@ import morgan from "morgan";
 import {
   initDiscord,
   onButtonInteraction,
-  sendExternalOfferMessageGateway,         // OFFER (offer-inquiries)
-  sendExternalConfirmationMessageGateway,  // CONFIRMATION (offer-inquiries)
+  sendExternalOfferMessageGateway,         // OFFER (pre-confirms)
+  sendExternalConfirmationMessageGateway,  // CONFIRMATION (pre-confirms)
   disableMessageButtonsGateway,
 } from "./lib/discord.js";
 import {
   logOfferMessage,
   listOfferMessagesForOrder,
   getInventoryLinkedSellerId,
-  setExternalConfirmation,                 // writes Status, Price, Seller, Offer VAT Type
+  setExternalConfirmation,
+
+  // NEW helpers for finalize flow
+  readExternalRecord,
+  writeExternalFeedback,
+  createSalesFromExternal,
+  createAffiliateFromExternal,
 } from "./lib/airtable.js";
 
 const app = express();
@@ -46,27 +52,18 @@ const toPct01 = (p) => {
   return n > 1 ? n / 100 : n; // 21 -> 0.21
 };
 
-/* -------------------- Mode + display decision -------------------- */
+/* -------------------- Mode + display decision (unchanged) -------------------- */
 function decideModeAndDisplay({
   vatTypeRaw, sellerCountry, sellerVatPct, sellerSuggestedRaw, ourOfferIncl,
 }) {
-  // Normalize VAT type (handles "VAT 0" / "VAT-0")
-  const vt = String(vatTypeRaw || "")
-    .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(/-/g, "");
-
-  // Normalize seller VAT% (handles "21%" or 21)
-  const sellerPct01 = toPct01(sellerVatPct ?? 21) ?? 0.21; // fallback 21%
-
-  // Treat as NL if country is NL or (VAT0 + VAT%≈21) to be resilient
+  const vt = String(vatTypeRaw || "").toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
+  const sellerPct01 = toPct01(sellerVatPct ?? 21) ?? 0.21;
   const treatAsNL = isNL(sellerCountry) || (vt.includes("VAT0") && Math.abs(sellerPct01 * 100 - 21) < 0.5);
 
   let basisSeller, basisOurs, display;
   let confirmedVatType;
 
   if (vt.includes("MARGIN")) {
-    // Compare incl; display incl (Margin)
     basisSeller = sellerSuggestedRaw;
     basisOurs   = ourOfferIncl;
     display = {
@@ -80,7 +77,6 @@ function decideModeAndDisplay({
     confirmedVatType = "Margin";
 
   } else if (vt.includes("VAT21")) {
-    // Compare incl; display incl (VAT 21%)
     basisSeller = sellerSuggestedRaw;
     basisOurs   = ourOfferIncl;
     display = {
@@ -94,8 +90,7 @@ function decideModeAndDisplay({
     confirmedVatType = "VAT21";
 
   } else if (vt.includes("VAT0") && treatAsNL) {
-    // VAT0 + NL → compare incl (uplift), display incl (VAT 21%)
-    const factor = 1 + sellerPct01; // ~1.21
+    const factor = 1 + sellerPct01;
     basisSeller = sellerSuggestedRaw * factor;
     basisOurs   = ourOfferIncl;
     display = {
@@ -109,8 +104,7 @@ function decideModeAndDisplay({
     confirmedVatType = "VAT21";
 
   } else if (vt.includes("VAT0")) {
-    // VAT0 + non-NL → compare/display on VAT0 basis (divide our incl by 1+VAT%)
-    const divisor = 1 + sellerPct01; // ~1.21
+    const divisor = 1 + sellerPct01;
     basisSeller = sellerSuggestedRaw;
     basisOurs   = ourOfferIncl / divisor;
     display = {
@@ -124,7 +118,6 @@ function decideModeAndDisplay({
     confirmedVatType = "VAT0";
 
   } else {
-    // Unknown → safe default: treat like VAT21 (incl basis)
     basisSeller = sellerSuggestedRaw;
     basisOurs   = ourOfferIncl;
     display = {
@@ -138,12 +131,11 @@ function decideModeAndDisplay({
     confirmedVatType = "VAT21";
   }
 
-  // Decide message type
   const mode = basisOurs < basisSeller ? "offer" : "confirm";
   return { mode, display, confirmedVatType, decision: { basisOurs, basisSeller } };
 }
 
-/* -------------------- External offers entry -------------------- */
+/* -------------------- External offers entry (unchanged) -------------------- */
 app.post("/external-offers", async (req, res) => {
   try {
     const p = req.body || {};
@@ -162,7 +154,7 @@ app.post("/external-offers", async (req, res) => {
       const sellerCountry     = s.sellerCountry || "";
       const sellerVatPct      = s.sellerVatRatePct ?? 21;
       const sellerSuggested   = Number(s.sellerSuggestedRaw);
-      const ourOfferIncl      = Number(s.baseOfferIncl); // YOUR typed offer (incl VAT)
+      const ourOfferIncl      = Number(s.baseOfferIncl);
       if (![sellerSuggested, ourOfferIncl].every(n => Number.isFinite(n))) continue;
 
       const { mode, display, confirmedVatType } = decideModeAndDisplay({
@@ -170,8 +162,7 @@ app.post("/external-offers", async (req, res) => {
       });
 
       if (mode === "offer") {
-        // Offer: show both prices (per VAT rules)
-        const offerPriceForButton = display.ourAmount; // what seller accepts if they click
+        const offerPriceForButton = display.ourAmount;
         const { channelId, messageId } = await sendExternalOfferMessageGateway({
           orderRecId,
           orderHumanId,
@@ -186,7 +177,7 @@ app.post("/external-offers", async (req, res) => {
           ourLabel:  display.ourLabel,
           ourValue:  `${euro(display.ourAmount)} ${display.vatTagOur}`,
           offerPrice: Number(offerPriceForButton.toFixed(2)),
-          vatLabel: confirmedVatType, // carry VAT label to click handler
+          vatLabel: confirmedVatType,
         });
 
         await logOfferMessage({
@@ -201,7 +192,6 @@ app.post("/external-offers", async (req, res) => {
         results.push({ sellerId: s.sellerId, messageId, kind: "offer", confirmedVatType });
 
       } else {
-        // Confirm: show single "Selling Price ..." line
         const confirmedDisplayAmount = display.yourAmount;
         const { channelId, messageId } = await sendExternalConfirmationMessageGateway({
           orderRecId,
@@ -214,7 +204,7 @@ app.post("/external-offers", async (req, res) => {
           size,
           sellingLine: `Selling Price ${euro(confirmedDisplayAmount)} ${display.vatTagYour}`,
           confirmPrice: Number(confirmedDisplayAmount.toFixed(2)),
-          vatLabel: confirmedVatType, // carry VAT label to click handler
+          vatLabel: confirmedVatType,
         });
 
         await logOfferMessage({
@@ -237,7 +227,7 @@ app.post("/external-offers", async (req, res) => {
   }
 });
 
-/* -------------------- Close all offers for an external record -------------------- */
+/* -------------------- Close all offers (unchanged) -------------------- */
 app.post("/disable-offers", async (req, res) => {
   try {
     const { orderRecId, reason } = req.body || {};
@@ -261,33 +251,29 @@ app.post("/disable-offers", async (req, res) => {
   }
 });
 
-/* -------------------- Button interactions (external only) -------------------- */
+/* -------------------- Button interactions (unchanged) -------------------- */
 await initDiscord();
 await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecordId, offerPrice, vatLabel, channelId, messageId }) => {
   try {
-    // External buttons are confirm_ext / deny_ext
     if (action === "deny_ext") {
       await disableMessageButtonsGateway(channelId, messageId, `❌ ${sellerId} denied / not available.`);
       return;
     }
-    if (action !== "confirm_ext") return; // ignore anything else
+    if (action !== "confirm_ext") return;
 
-    // Get linked seller from Inventory
     const confirmedSellerRecId = await getInventoryLinkedSellerId(inventoryRecordId);
 
-    // Write Status + Price + Seller + Offer VAT Type
     await setExternalConfirmation({
       orderRecId,
       confirmedPrice: offerPrice,
       confirmedSellerRecId,
       statusName: "Confirmed",
       offerVatTypeLabel: vatLabel, // "Margin" | "VAT0" | "VAT21"
-      dealStatusName: "Closing", // 👈 NEW: make sure Deal Status flips to Closing now
+      dealStatusName: "Closing",   // move to Closing on accept
     });
 
     await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
 
-    // Close other messages for this order
     const msgs = await listOfferMessagesForOrder(orderRecId);
     await Promise.allSettled(
       msgs
@@ -296,6 +282,100 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
     );
   } catch (e) {
     console.error("Interaction handling error:", e);
+  }
+});
+
+/* ========================================================================
+   NEW: Finalize External Deal → create Sales + Affiliate Sales
+   Triggered by Airtable Automation (when Deal Status=Deal Closed AND Final Deal Price present)
+   ======================================================================== */
+app.post("/finalize-external-deal", async (req, res) => {
+  const recordId = req.body?.recordId;
+  if (!recordId) return res.status(400).json({ error: "Missing recordId" });
+
+  try {
+    const f = await readExternalRecord(recordId);
+
+    // Required presence checks
+    const missing = [];
+    if (f["Final Deal Price"] == null)                          missing.push("Final Deal Price");
+    if (!Array.isArray(f["Buyer"]) || f["Buyer"].length === 0)  missing.push("Buyer");
+    if (!Array.isArray(f["Shipping Label"]) || f["Shipping Label"].length === 0)
+      missing.push("Shipping Label");
+
+    if (missing.length) {
+      await writeExternalFeedback(recordId, {
+        feedback: `❌ Missing required: ${missing.join(", ")}.`,
+        dealStatusName: "Closing",
+      });
+      return res.status(422).json({ error: "Missing required fields", missing });
+    }
+
+    // Business rules
+    const finalDeal = toNumber(f["Final Deal Price"]);
+    const minDeal   = f["Minimum Deal Price"] == null ? null : toNumber(f["Minimum Deal Price"]);
+    const exceptionOk = !!f["Exception Approved?"];
+
+    if (minDeal != null && finalDeal != null && finalDeal < minDeal && !exceptionOk) {
+      await writeExternalFeedback(recordId, {
+        feedback: `❌ Final Deal Price (${euro(finalDeal)}) is lower than Minimum Deal Price (${euro(minDeal)}). Ask Admin for approval.`,
+        dealStatusName: "Closing",
+      });
+      return res.status(422).json({ error: "Below minimum without approval" });
+    }
+
+    // Guard: must have confirmed offer pieces to build Sales
+    const hasSKU            = Array.isArray(f["SKU"]) && f["SKU"].length > 0;
+    const hasSeller         = Array.isArray(f["Confirmed Seller"]) && f["Confirmed Seller"].length > 0;
+    const hasConfirmedPrice = f["Confirmed Offer Price"] != null;
+
+    if (!hasSKU || !hasSeller || !hasConfirmedPrice) {
+      await writeExternalFeedback(recordId, {
+        feedback: "❌ Missing confirmed offer details (SKU / Confirmed Seller / Confirmed Offer Price). Confirm an offer first.",
+        dealStatusName: "Closing",
+      });
+      return res.status(422).json({ error: "Missing confirmed offer pieces" });
+    }
+
+    // Create Sales
+    let salesId;
+    try {
+      salesId = await createSalesFromExternal(f);
+    } catch (e) {
+      await writeExternalFeedback(recordId, {
+        feedback: `❌ Could not create Sales: ${e.message}`,
+        dealStatusName: "Closing",
+      });
+      return res.status(500).json({ error: "Sales create failed", detail: e.message });
+    }
+
+    // Create Affiliate Sales
+    try {
+      await createAffiliateFromExternal(f, salesId);
+    } catch (e) {
+      await writeExternalFeedback(recordId, {
+        feedback: `⚠️ Sales created (${salesId}) but Affiliate Sales failed: ${e.message}`,
+        dealStatusName: "Closing",
+      });
+      return res.status(500).json({ error: "Affiliate Sales create failed", salesId, detail: e.message });
+    }
+
+    // Success message (you can also move Deal Status forward here if you want)
+    await writeExternalFeedback(recordId, {
+      feedback: `✅ Created Sales (${salesId}) and Affiliate Sales.`,
+      // dealStatusName: "Closed", // uncomment if you want to move it forward
+    });
+
+    return res.json({ ok: true, salesId });
+  } catch (e) {
+    console.error("finalize-external-deal error:", e);
+    try {
+      await writeExternalFeedback(recordId, {
+        feedback: `❌ Server error: ${e.message}`,
+        dealStatusName: "Closing",
+      });
+    } catch (_) {}
+    return res.status(500).json({ error: e.message });
   }
 });
 
