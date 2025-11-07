@@ -7,6 +7,7 @@ import {
   sendExternalOfferMessageGateway,         // OFFER (pre-confirms)
   sendExternalConfirmationMessageGateway,  // CONFIRMATION (pre-confirms)
   disableMessageButtonsGateway,
+  sendDealUpdateMessage,
 } from "./lib/discord.js";
 import {
   logOfferMessage,
@@ -134,6 +135,35 @@ function decideModeAndDisplay({
   const mode = basisOurs < basisSeller ? "offer" : "confirm";
   return { mode, display, confirmedVatType, decision: { basisOurs, basisSeller } };
 }
+
+// ───────────────── Deal Updates (called from Make) ─────────────────
+const INCOMING_BOT_KEY = process.env.INCOMING_BOT_KEY; // set this in your env
+
+app.post("/deal-update", async (req, res) => {
+  try {
+    // Simple auth: Make must send x-bot-key header matching env
+    if (!INCOMING_BOT_KEY || req.headers["x-bot-key"] !== INCOMING_BOT_KEY) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const p = req.body || {};
+    const sellerId   = p.sellerId || null;
+    const sellerName = p.sellerName || sellerId;
+    const content    = p.content;
+    const embed      = p.embed || null; // optional
+
+    if (!sellerName || !content) {
+      return res.status(400).json({ error: "sellerName (or sellerId) and content are required" });
+    }
+
+    const msg = await sendDealUpdateMessage({ sellerId, sellerName, content, embed });
+    res.json({ ok: true, messageId: msg.id, channelId: msg.channel_id });
+  } catch (e) {
+    console.error("deal-update error:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 /* -------------------- External offers entry (unchanged) -------------------- */
 app.post("/external-offers", async (req, res) => {
