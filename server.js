@@ -137,12 +137,12 @@ function decideModeAndDisplay({
 }
 
 // ───────────────── Deal Updates (called from Make) ─────────────────
-const INCOMING_BOT_KEY = process.env.INCOMING_BOT_KEY; // set this in your env
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN; // set this in your env
 
 app.post("/deal-update", async (req, res) => {
   try {
     // Simple auth: Make must send x-bot-key header matching env
-    if (!INCOMING_BOT_KEY || req.headers["x-bot-key"] !== INCOMING_BOT_KEY) {
+    if (!DISCORD_BOT_TOKEN || req.headers["x-bot-key"] !== DISCORD_BOT_TOKEN) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
