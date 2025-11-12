@@ -59,7 +59,7 @@ function decideModeAndDisplay({
 }) {
   const vt = String(vatTypeRaw || "").toUpperCase().replace(/\s+/g, "").replace(/-/g, "");
   const sellerPct01 = toPct01(sellerVatPct ?? 21) ?? 0.21;
-  const treatAsNL = isNL(sellerCountry) || (vt.includes("VAT0") && Math.abs(sellerPct01 * 100 - 21) < 0.5);
+  const treatAsNL = isNL(sellerCountry); // remove the "~21%" heuristic
 
   let basisSeller, basisOurs, display;
   let confirmedVatType;
