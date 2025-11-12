@@ -20,6 +20,7 @@ import {
   writeExternalFeedback,
   createSalesFromExternal,
   createAffiliateFromExternal,
+  getInventorySellerCountry,   //  👈 add this
 } from "./lib/airtable.js";
 
 const app = express();
@@ -318,15 +319,35 @@ await onButtonInteraction(async ({ action, orderRecId, sellerId, inventoryRecord
 
     const confirmedSellerRecId = await getInventoryLinkedSellerId(inventoryRecordId);
 
-    await setExternalConfirmation({
-      orderRecId,
-      confirmedPrice: offerPrice,
-      confirmedSellerRecId,
-      statusName: "Confirmed",
-      offerVatTypeLabel: vatLabel,       // "Margin" | "VAT0" | "VAT21"
-      dealStatusName: "Closing",
-      confirmedInventoryRecId: inventoryRecordId, // ← NEW: remember which Inventory row to decrement
-    });
+        // --- NEW: If confirmed seller is NL, force VAT21 and convert price if coming from VAT0 ---
+        let finalVatLabel = vatLabel;
+        let finalPrice    = offerPrice;
+
+        try {
+          const invCountry = await getInventorySellerCountry(inventoryRecordId);
+          if (isNL(invCountry) && (vatLabel || "").toUpperCase() !== "MARGIN") {
+            // We always store confirmations from NL sellers as VAT21
+            finalVatLabel = "VAT21";
+
+            // If the button carried a VAT0 amount (net), convert it to incl-21%
+            if ((vatLabel || "").toUpperCase() === "VAT0") {
+              finalPrice = Number((Number(offerPrice || 0) * 1.21).toFixed(2));
+            }
+          }
+        } catch (_) {
+          // If we can't read the country, we just proceed with the original label/price.
+        }
+
+        await setExternalConfirmation({
+          orderRecId,
+          confirmedPrice: finalPrice,
+          confirmedSellerRecId,
+          statusName: "Confirmed",
+          offerVatTypeLabel: finalVatLabel,   // enforce VAT21 for NL sellers
+          dealStatusName: "Closing",
+          confirmedInventoryRecId: inventoryRecordId,
+        });
+
 
     await disableMessageButtonsGateway(channelId, messageId, `✅ Confirmed by ${sellerId}.`);
 
