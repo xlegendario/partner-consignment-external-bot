@@ -53,6 +53,31 @@ const toPct01 = (p) => {
   return n > 1 ? n / 100 : n; // 21 -> 0.21
 };
 
+// Helper to pull a readable string from Airtable single-select/lookup/text
+const toText = (val) => {
+  if (val == null) return null;
+
+  if (Array.isArray(val)) {
+    for (const v of val) {
+      if (typeof v === "string" && v.trim()) return v.trim();
+      if (v && typeof v === "object") {
+        if (typeof v.name === "string" && v.name.trim()) return v.name.trim();
+        if (typeof v.value === "string" && v.value.trim()) return v.value.trim();
+      }
+    }
+    return null;
+  }
+
+  if (typeof val === "object") {
+    if (typeof val.name === "string" && val.name.trim()) return val.name.trim();
+    if (typeof val.value === "string" && val.value.trim()) return val.value.trim();
+    return null;
+  }
+
+  return String(val);
+};
+
+
 /* -------------------- Mode + display decision (unchanged) -------------------- */
 function decideModeAndDisplay({
   vatTypeRaw, sellerCountry, sellerVatPct, sellerSuggestedRaw, ourOfferIncl,
@@ -327,7 +352,7 @@ app.post("/finalize-external-deal", async (req, res) => {
   try {
     const f = await readExternalRecord(recordId);
 
-    // Required presence checks
+    // ---------- Required presence (unchanged) ----------
     const missing = [];
     if (f["Final Deal Price"] == null)                          missing.push("Final Deal Price");
     if (!Array.isArray(f["Buyer"]) || f["Buyer"].length === 0)  missing.push("Buyer");
@@ -342,20 +367,7 @@ app.post("/finalize-external-deal", async (req, res) => {
       return res.status(422).json({ error: "Missing required fields", missing });
     }
 
-    // Business rules
-    const finalDeal = toNumber(f["Final Deal Price"]);
-    const minDeal   = f["Minimum Deal Price"] == null ? null : toNumber(f["Minimum Deal Price"]);
-    const exceptionOk = !!f["Exception Approved?"];
-
-    if (minDeal != null && finalDeal != null && finalDeal < minDeal && !exceptionOk) {
-      await writeExternalFeedback(recordId, {
-        feedback: `❌ Final Deal Price (${euro(finalDeal)}) is lower than Minimum Deal Price (${euro(minDeal)}). Ask Admin for approval.`,
-        dealStatusName: "Closing",
-      });
-      return res.status(422).json({ error: "Below minimum without approval" });
-    }
-
-    // Guard: must have confirmed offer pieces to build Sales
+    // ---------- Confirmed-offer guard (unchanged) ----------
     const hasSKU            = Array.isArray(f["SKU"]) && f["SKU"].length > 0;
     const hasSeller         = Array.isArray(f["Confirmed Seller"]) && f["Confirmed Seller"].length > 0;
     const hasConfirmedPrice = f["Confirmed Offer Price"] != null;
@@ -368,10 +380,104 @@ app.post("/finalize-external-deal", async (req, res) => {
       return res.status(422).json({ error: "Missing confirmed offer pieces" });
     }
 
-    // Create Sales
+    // ---------- NEW: Selling VAT handling ----------
+    const offerVatType   = toText(f["Offer VAT Type"]);     // stored earlier at confirmation
+    const sellingVatSel  = toText(f["Selling VAT Type"]);   // employee-chosen single-select (VAT21 | VAT0 | Margin | Private)
+    const buyerCountry   = toText(f["Buyer Country"]);      // lookup
+    const buyerVatId     = toText(f["Buyer VAT ID"]);       // lookup
+    const isPrivateSel   = (sellingVatSel || "").toLowerCase() === "private";
+
+    // Map "Private" to the real invoice VAT regime (Margin stays Margin; otherwise VAT21)
+    function mapSellingVat(offerVat, sellingSel) {
+      const sel = (sellingSel || "").toUpperCase();
+      const off = (offerVat || "").toUpperCase();
+
+      if (off.includes("MARGIN")) {
+        // Margin goods must be invoiced as Margin
+        return "Margin";
+      }
+      if (sel === "PRIVATE") {
+        // Private buyers → VAT21 on invoice (unless Margin handled above)
+        return "VAT21";
+      }
+      if (sel === "VAT21" || sel === "VAT 21%") return "VAT21";
+      if (sel === "VAT0"  || sel === "VAT 0%")  return "VAT0";
+      if (sel === "MARGIN")                     return "Margin";
+      return null;
+    }
+
+    const mappedVat = mapSellingVat(offerVatType, sellingVatSel);
+    if (!mappedVat) {
+      await writeExternalFeedback(recordId, {
+        feedback: "❌ Selling VAT Type is missing or invalid.",
+        dealStatusName: "Closing",
+      });
+      return res.status(422).json({ error: "Invalid Selling VAT Type" });
+    }
+
+    // Structural validity
+    if ((offerVatType || "").toUpperCase().includes("MARGIN")) {
+      // Margin can ONLY be sold as Margin. If staff explicitly chose non-Margin (not Private), block.
+      if (!isPrivateSel && (sellingVatSel || "").toUpperCase() !== "MARGIN") {
+        await writeExternalFeedback(recordId, {
+          feedback: "❌ Margin goods must be invoiced as Margin.",
+          dealStatusName: "Closing",
+        });
+        return res.status(422).json({ error: "Margin must be sold as Margin" });
+      }
+    } else {
+      // Non-Margin goods
+      if (mappedVat === "VAT0") {
+        // VAT0 only for non-NL company with valid VAT ID
+        if (isNL(buyerCountry)) {
+          await writeExternalFeedback(recordId, {
+            feedback: "❌ VAT 0% selected but Buyer Country is NL. Use VAT 21% or adjust buyer.",
+            dealStatusName: "Closing",
+          });
+          return res.status(422).json({ error: "VAT0 not allowed for NL buyer" });
+        }
+        if (!buyerVatId) {
+          await writeExternalFeedback(recordId, {
+            feedback: "❌ VAT 0% selected but Buyer VAT ID is missing. Provide VAT ID or use VAT 21%.",
+            dealStatusName: "Closing",
+          });
+          return res.status(422).json({ error: "VAT0 requires Buyer VAT ID" });
+        }
+      }
+    }
+
+    // ---------- Minimum floor check based on mapped VAT ----------
+    const toNumber = (v) => {
+      if (typeof v === "number") return v;
+      if (typeof v === "string") {
+        const n = parseFloat(v.replace(/[^\d.,-]/g, "").replace(",", "."));
+        return Number.isFinite(n) ? n : null;
+      }
+      return null;
+    };
+
+    const finalDeal     = toNumber(f["Final Deal Price"]);
+    const exceptionOk   = !!f["Exception Approved?"];
+
+    const minByVat = {
+      "VAT0":   f["Minimum Deal Price (VAT 0%)"],
+      "VAT21":  f["Minimum Deal Price (VAT 21%)"],
+      "Margin": f["Minimum Deal Price (Margin)"],
+    };
+    const minForMapped = toNumber(minByVat[mappedVat]);
+
+    if (minForMapped != null && finalDeal != null && finalDeal < minForMapped && !exceptionOk) {
+      await writeExternalFeedback(recordId, {
+        feedback: `❌ Final Deal Price (${euro(finalDeal)}) is lower than the minimum for ${mappedVat} (${euro(minForMapped)}). Ask Admin for approval or adjust Selling VAT Type/price.`,
+        dealStatusName: "Closing",
+      });
+      return res.status(422).json({ error: "Below minimum for selected Selling VAT Type" });
+    }
+
+    // ---------- Create Sales with VAT override ----------
     let salesId;
     try {
-      salesId = await createSalesFromExternal(f);
+      salesId = await createSalesFromExternal(f, { overrideVatType: mappedVat });
     } catch (e) {
       await writeExternalFeedback(recordId, {
         feedback: `❌ Could not create Sales: ${e.message}`,
@@ -380,7 +486,7 @@ app.post("/finalize-external-deal", async (req, res) => {
       return res.status(500).json({ error: "Sales create failed", detail: e.message });
     }
 
-    // Create Affiliate Sales
+    // ---------- Create Affiliate Sales (unchanged logic) ----------
     try {
       await createAffiliateFromExternal(f, salesId);
     } catch (e) {
@@ -391,10 +497,10 @@ app.post("/finalize-external-deal", async (req, res) => {
       return res.status(500).json({ error: "Affiliate Sales create failed", salesId, detail: e.message });
     }
 
-    // Success message + move status forward ✅
+    // ---------- Success ----------
     await writeExternalFeedback(recordId, {
       feedback: `✅ Deal processed. Sales created: ${salesId}. Affiliate Sales created successfully.`,
-      dealStatusName: "Deal Processed",   // 👈 move to the final state
+      dealStatusName: "Deal Processed",
     });
 
     return res.json({ ok: true, salesId });
