@@ -416,7 +416,11 @@ app.post("/finalize-external-deal", async (req, res) => {
     }
 
     // Structural validity
-    if ((offerVatType || "").toUpperCase().includes("MARGIN")) {
+    const offerIsMargin   = (offerVatType || "").toUpperCase().includes("MARGIN");
+    const buyerIsNL       = isNL(buyerCountry);
+    const hasBuyerVatId   = !!buyerVatId;
+
+    if (offerIsMargin) {
       // Margin can ONLY be sold as Margin. If staff explicitly chose non-Margin (not Private), block.
       if (!isPrivateSel && (sellingVatSel || "").toUpperCase() !== "MARGIN") {
         await writeExternalFeedback(recordId, {
@@ -427,22 +431,42 @@ app.post("/finalize-external-deal", async (req, res) => {
       }
     } else {
       // Non-Margin goods
+
+      // 1) If staff chose VAT0 → enforce requirements
       if (mappedVat === "VAT0") {
-        // VAT0 only for non-NL company with valid VAT ID
-        if (isNL(buyerCountry)) {
+        if (buyerIsNL) {
           await writeExternalFeedback(recordId, {
             feedback: "❌ VAT 0% selected but Buyer Country is NL. Use VAT 21% or adjust buyer.",
             dealStatusName: "Closing",
           });
           return res.status(422).json({ error: "VAT0 not allowed for NL buyer" });
         }
-        if (!buyerVatId) {
+        if (!hasBuyerVatId) {
           await writeExternalFeedback(recordId, {
-            feedback: "❌ VAT 0% selected but Buyer VAT ID is missing. Provide VAT ID or use VAT 21% or Private if it's a private seller.",
+            feedback: "❌ VAT 0% selected but Buyer VAT ID is missing. Provide VAT ID or use VAT 21%.",
             dealStatusName: "Closing",
           });
           return res.status(422).json({ error: "VAT0 requires Buyer VAT ID" });
         }
+      }
+
+      // 2) NEW: If staff chose VAT21 but buyer qualifies for VAT0 → block and instruct
+      //    Non-NL company with a VAT ID should be VAT 0%.
+      if (mappedVat === "VAT21" && !buyerIsNL && hasBuyerVatId) {
+        await writeExternalFeedback(recordId, {
+          feedback: "❌ Buyer is a non-NL company with a VAT ID; Selling VAT Type must be VAT 0%.",
+          dealStatusName: "Closing",
+        });
+        return res.status(422).json({ error: "Use VAT0 for non-NL company with VAT ID" });
+      }
+
+      // 3) Optional hygiene: "Private" shouldn’t have a VAT ID
+      if (isPrivateSel && hasBuyerVatId) {
+        await writeExternalFeedback(recordId, {
+          feedback: "❌ 'Private' selected but Buyer has a VAT ID. Choose VAT 21% (NL/private) or VAT 0% (non-NL company).",
+          dealStatusName: "Closing",
+        });
+        return res.status(422).json({ error: "Private not allowed when Buyer VAT ID present" });
       }
     }
 
