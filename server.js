@@ -438,7 +438,7 @@ app.post("/finalize-external-deal", async (req, res) => {
         }
         if (!buyerVatId) {
           await writeExternalFeedback(recordId, {
-            feedback: "❌ VAT 0% selected but Buyer VAT ID is missing. Provide VAT ID or use VAT 21%.",
+            feedback: "❌ VAT 0% selected but Buyer VAT ID is missing. Provide VAT ID or use VAT 21% or Private if it's a private seller.",
             dealStatusName: "Closing",
           });
           return res.status(422).json({ error: "VAT0 requires Buyer VAT ID" });
