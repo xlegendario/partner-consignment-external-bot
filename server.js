@@ -520,9 +520,12 @@ app.post("/finalize-external-deal", async (req, res) => {
     }
 
     // ---------- Create Sales with VAT override ----------
+    // Sales.VAT Type moet de inkoop-kant blijven (Offer VAT Type),
+    // niet de Selling VAT Type richting buyer.
     let salesId;
     try {
-      salesId = await createSalesFromExternal(f, { overrideVatType: mappedVat });
+      const purchaseVatType = offerVatType; // e.g. "VAT21" / "VAT0" / "Margin"
+      salesId = await createSalesFromExternal(f, { overrideVatType: purchaseVatType });
     } catch (e) {
       await writeExternalFeedback(recordId, {
         feedback: `❌ Could not create Sales: ${e.message}`,
